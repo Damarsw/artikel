@@ -1,0 +1,37 @@
+name: Mojok Telegram Bot Cron
+
+on:
+  schedule:
+    # Format CRON (UTC Time). 0 */3 * * * = Tiap 3 Jam
+    - cron: '0 */3 * * *'
+  workflow_dispatch: # Supaya bisa di-run manual lewat tombol di GitHub UI
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: Run Scraping Script
+      env:
+        DB_USER: ${{ secrets.DB_USER }}
+        DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        DB_HOST: ${{ secrets.DB_HOST }}
+        APP_NAME: ${{ secrets.APP_NAME }}
+        DB_NAME: ${{ secrets.DB_NAME }}
+        COLLECTION_NAME: ${{ secrets.COLLECTION_NAME }}
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python notifnupdate.py
