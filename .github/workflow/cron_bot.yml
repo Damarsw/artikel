@@ -3,7 +3,7 @@ name: Mojok Telegram Bot Cron
 on:
   schedule:
     # Format CRON (UTC Time). 0 */3 * * * = Tiap 3 Jam
-    - cron: '0 */3 * * *'
+    - cron: '0 */12 * * *'
   workflow_dispatch: # Supaya bisa di-run manual lewat tombol di GitHub UI
 
 jobs:
