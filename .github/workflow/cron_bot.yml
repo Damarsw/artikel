@@ -8,7 +8,7 @@ on:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    environment: ENV_FILE
+    environment: ENV_FILE 
 
     steps:
     - name: Check out repository
@@ -24,8 +24,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
 
-    # Menyuntikkan isi Secret ENV_FILE menjadi file .env nyata
-    - name: Create .env file from secret
+    - name: Create .env file
       run: |
         echo "${{ secrets.ENV_FILE }}" > .env
 
