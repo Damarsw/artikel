@@ -11,6 +11,8 @@ permissions:
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    # PENTING: Harus dideklarasikan agar GitHub Actions bisa membaca Environment secrets
+    environment: ENV_FILE
 
     steps:
       - name: Check out repository
@@ -26,7 +28,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Create .env file from Secret
+      - name: Create .env file
         run: |
           echo "${{ secrets.ENV_FILE }}" > .env
 
