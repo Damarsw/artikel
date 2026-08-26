@@ -13,6 +13,7 @@ from pymongo import MongoClient, UpdateOne
 from tqdm.asyncio import tqdm
 
 # ================= 1. CONFIGURATION & ENV =================
+# Memuat file .env yang dibuat oleh GitHub Actions
 load_dotenv(dotenv_path='.env', override=True)
 
 DB_USER = os.getenv("DB_USER")
@@ -43,18 +44,6 @@ def get_db_collection():
         mongo_uri = f"mongodb+srv://{DB_USER}:{encoded_password}@{DB_HOST}/?appName={APP_NAME}"
         
         client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-        client.admin.command('ping')
-        db = client[DB_NAME]
-        collection = db[COLLECTION_NAME]
-        collection.create_index("url", unique=True)
-        return collection
-    except Exception as e:
-        print(f"❌ Gagal koneksi MongoDB Atlas: {e}")
-        sys.exit(1)
-# ================= 2. HELPER FUNCTIONS =================
-def get_db_collection():
-    try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         client.admin.command('ping')
         db = client[DB_NAME]
         collection = db[COLLECTION_NAME]
@@ -225,7 +214,6 @@ async def process_single_category_page(session, page_url, proxies, semaphore, vi
             async with lock:
                 with open(TEMP_SLUGS_FILE, "a", encoding="utf-8") as f:
                     for link in links:
-                        # DILENGKAPI STRICT FILTER: BUANG /video/ & DUPLIKAT
                         if "/video/" not in link and link not in visited_slugs:
                             visited_slugs.add(link)
                             f.write(f"{link}\n")
