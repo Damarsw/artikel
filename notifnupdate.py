@@ -13,7 +13,7 @@ from pymongo import MongoClient, UpdateOne
 from tqdm.asyncio import tqdm
 
 # ================= 1. CONFIGURATION & ENV =================
-load_dotenv()
+load_dotenv(dotenv_path='.env', override=True)
 
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
@@ -24,9 +24,6 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "articles")
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-encoded_password = quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
-MONGO_URI = f"mongodb+srv://{DB_USER}:{encoded_password}@{DB_HOST}/?appName={APP_NAME}"
 
 BASE_TARGET_URL = "https://mojok.co/"
 TEMP_SLUGS_FILE = "temp_all_slugs.txt"
@@ -39,6 +36,21 @@ CONCURRENCY_LIMIT_ARTICLE = 100
 RE_PUB = re.compile(r'(?i)<meta\s+property=["\']article:published_time["\']\s+content=["\']([^"\']+)["\']')
 RE_MOD = re.compile(r'(?i)<meta\s+property=["\']article:modified_time["\']\s+content=["\']([^"\']+)["\']')
 
+# ================= 2. HELPER FUNCTIONS =================
+def get_db_collection():
+    try:
+        encoded_password = quote_plus(DB_PASSWORD) if DB_PASSWORD else ""
+        mongo_uri = f"mongodb+srv://{DB_USER}:{encoded_password}@{DB_HOST}/?appName={APP_NAME}"
+        
+        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+        client.admin.command('ping')
+        db = client[DB_NAME]
+        collection = db[COLLECTION_NAME]
+        collection.create_index("url", unique=True)
+        return collection
+    except Exception as e:
+        print(f"❌ Gagal koneksi MongoDB Atlas: {e}")
+        sys.exit(1)
 # ================= 2. HELPER FUNCTIONS =================
 def get_db_collection():
     try:
