@@ -29,16 +29,15 @@ BASE_TARGET_URL = "https://mojok.co/"
 TEMP_SLUGS_FILE = "temp_all_slugs.txt"
 PROXY_LIST_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
 
-CONCURRENCY_LIMIT_CATEGORY = 50
-CONCURRENCY_LIMIT_ARTICLE = 50
+# Diturunkan agar aman dan tidak memicu rate-limit / hang di GitHub Actions
+CONCURRENCY_LIMIT_CATEGORY = 15
+CONCURRENCY_LIMIT_ARTICLE = 15
 
-# URL Non-artikel yang Wajib Diabaikan Bot
 IGNORED_PATHS = {
-    'video', 'terminal', 'kirim-artikel', 'tentang', 'kru-mojok',
-    'kontak', 'pedoman-media-siber', 'kebijakan-privasi', 'page'
+    'kirim-artikel', 'kirim-tulisan', 'tentang', 'kru-mojok',
+    'kontak', 'pedoman-media-siber', 'kebijakan-privasi', 'page', 'ketentuan', 'faq'
 }
 
-# Regex Meta Dates
 RE_PUB = re.compile(r'(?i)<meta\s+property=["\']article:published_time["\']\s+content=["\']([^"\']+)["\']')
 RE_MOD = re.compile(r'(?i)<meta\s+property=["\']article:modified_time["\']\s+content=["\']([^"\']+)["\']')
 
@@ -58,49 +57,31 @@ def get_db_collection():
         print(f"❌ Gagal koneksi MongoDB Atlas: {e}")
         sys.exit(1)
 
-def extract_slugs(url_str):
-    """
-    Mengekstrak slug, sub_slug, sub_sub_slug, dan article_slug secara fleksibel berdasarkan kedalaman URL:
-    - https://mojok.co/tajuk/judul-artikel/
-        -> slug: "tajuk", sub_slug: "", sub_sub_slug: "", article_slug: "judul-artikel"
-    - https://mojok.co/kilas/hukum/judul-artikel/
-        -> slug: "kilas", sub_slug: "hukum", sub_sub_slug: "", article_slug: "judul-artikel"
-    - https://mojok.co/liputan/catatan/nasional/judul-artikel/
-        -> slug: "liputan", sub_slug: "catatan", sub_sub_slug: "nasional", article_slug: "judul-artikel"
-    """
+def extract_slugs_dynamic(url_str):
     try:
         parsed = urllib.parse.urlparse(url_str)
         path_parts = [p for p in parsed.path.strip('/').split('/') if p]
         
         if not path_parts:
-            return "", "", "", ""
-        
-        slug = ""
-        sub_slug = ""
-        sub_sub_slug = ""
-        article_slug = ""
+            return {}
 
-        if len(path_parts) >= 4:
-            slug = path_parts[0]
-            sub_slug = path_parts[1]
-            sub_sub_slug = path_parts[2]
-            article_slug = path_parts[3]
-        elif len(path_parts) == 3:
-            slug = path_parts[0]
-            sub_slug = path_parts[1]
-            sub_sub_slug = ""
-            article_slug = path_parts[2]
-        elif len(path_parts) == 2:
-            slug = path_parts[0]
-            sub_slug = ""
-            sub_sub_slug = ""
-            article_slug = path_parts[1]
-        else:
-            slug = path_parts[0]
+        article_slug = path_parts[-1]
+        category_parts = path_parts[:-1]
 
-        return slug, sub_slug, sub_sub_slug, article_slug
+        slug_data = {
+            "slug": category_parts[0] if len(category_parts) > 0 else "",
+            "sub_slug": category_parts[1] if len(category_parts) > 1 else "",
+            "sub_sub_slug": category_parts[2] if len(category_parts) > 2 else "",
+            "article_slug": article_slug
+        }
+
+        if len(category_parts) > 3:
+            for idx, extra_cat in enumerate(category_parts[3:], start=3):
+                slug_data[f"sub_{'sub_' * idx}slug"] = extra_cat
+
+        return slug_data
     except Exception:
-        return "", "", "", ""
+        return {"slug": "", "sub_slug": "", "sub_sub_slug": "", "article_slug": ""}
 
 def is_valid_article_url(url_str):
     if not url_str or "mojok.co" not in url_str:
@@ -114,7 +95,11 @@ def is_valid_article_url(url_str):
     
     if parts[0] in IGNORED_PATHS or parts[-1] in IGNORED_PATHS:
         return False
-    if len(parts) == 1 and parts[0] in {'esai', 'tajuk', 'pojokan', 'kilas', 'cuan', 'otomojok', 'maljum', 'liputan'}:
+    
+    if parts[-1] in {'topik', 'kuliner', 'hiburan', 'gaya-hidup', 'film', 'anime', 'musik', 'sinetron', 'serial', 'game', 'gadget', 'kampus', 'pendidikan'}:
+        return False
+
+    if len(parts) == 1 and parts[0] in {'esai', 'tajuk', 'pojokan', 'kilas', 'cuan', 'otomojok', 'maljum', 'liputan', 'terminal'}:
         return False
         
     return True
@@ -175,7 +160,7 @@ def clean_existing_slugs_file():
 
 async def fetch_proxy_list(session):
     try:
-        async with session.get(PROXY_LIST_URL, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
+        async with session.get(PROXY_LIST_URL, timeout=aiohttp.ClientTimeout(total=8), ssl=False) as resp:
             if resp.status == 200:
                 text = await resp.text()
                 return [
@@ -186,26 +171,32 @@ async def fetch_proxy_list(session):
         pass
     return []
 
-async def fetch_html_loop(session, url, proxies, batch_size=10, timeout=7):
-    for attempt in range(4):
-        if attempt >= 2 or not proxies:
+async def fetch_html_loop(session, url, proxies, batch_size=5, timeout=5):
+    for attempt in range(3):
+        # 1. Direct fetch (tanpa proxy)
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6), ssl=False) as resp:
+                if resp.status == 200:
+                    return await resp.text()
+        except Exception:
+            pass
+
+        # 2. Proxy fetch
+        if proxies:
+            import random
+            batch = random.sample(proxies, min(batch_size, len(proxies)))
+            tasks = [try_proxy(session, url, p, timeout) for p in batch]
+            
             try:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=10), ssl=False) as resp:
-                    if resp.status == 200:
-                        return await resp.text()
-            except Exception:
+                # Maksimal tunggu 8 detik per batch proxy
+                results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.0)
+                for html in results:
+                    if isinstance(html, str) and html:
+                        return html
+            except asyncio.TimeoutError:
                 pass
-            continue
-
-        import random
-        batch = random.sample(proxies, min(batch_size, len(proxies)))
-        tasks = [try_proxy(session, url, p, timeout) for p in batch]
-        results = await asyncio.gather(*tasks)
-
-        for html in results:
-            if html:
-                return html
-        await asyncio.sleep(0.1)
+            
+        await asyncio.sleep(0.2)
     return None
 
 async def try_proxy(session, url, proxy, timeout=5):
@@ -221,19 +212,11 @@ def extract_category_links(html_content):
     soup = BeautifulSoup(html_content, 'html.parser')
     links_list = []
     
-    nav_ul = soup.find('ul', class_='tm-nav-list')
-    if nav_ul:
-        for a_tag in nav_ul.find_all('a', href=True):
+    nav_uls = soup.find_all('ul', class_=['tm-nav-list', 'tm-liputan-menu'])
+    for ul in nav_uls:
+        for a_tag in ul.find_all('a', href=True):
             href = a_tag['href'].strip()
-            if is_valid_article_url(href) or any(cat in href for cat in ['/esai/', '/tajuk/', '/pojokan/', '/kilas/', '/cuan/', '/otomojok/', '/maljum/', '/liputan/']):
-                if href not in links_list:
-                    links_list.append(href)
-                    
-    liputan_ul = soup.find('ul', class_='tm-liputan-menu')
-    if liputan_ul:
-        for a_tag in liputan_ul.find_all('a', href=True):
-            href = a_tag['href'].strip()
-            if href not in links_list:
+            if href not in links_list and ("mojok.co" in href):
                 links_list.append(href)
                 
     return links_list
@@ -294,7 +277,8 @@ async def fetch_all_sub_slugs(session, category_urls, proxies):
         max_page = get_max_page(first_html)
         base_url = cat_url.rstrip('/')
 
-        pbar = tqdm(total=max_page, desc=f"Pagination ({cat_url.split('/')[-2]})", unit="page", leave=True)
+        cat_name = [p for p in cat_url.split('/') if p][-1]
+        pbar = tqdm(total=max_page, desc=f"Pagination ({cat_name})", unit="page", leave=True)
 
         tasks = [
             process_single_category_page(
@@ -314,23 +298,19 @@ async def fetch_all_sub_slugs(session, category_urls, proxies):
 def parse_article_detail(html_content, url):
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    # Deteksi Apakah Artikel Merupakan Headline
     is_headline = False
     headline_span = soup.find('span', string=re.compile(r'Headline', re.I))
     if headline_span:
         is_headline = True
 
-    # Judul Artikel
     title_tag = soup.find('h1', class_='mj-hero-slide-title') or soup.find('h1')
     title = title_tag.get_text(strip=True) if title_tag else "Tanpa Judul"
 
-    # Featured Image
     featured_image_url = ""
     og_img = soup.find('meta', property='og:image')
     if og_img and og_img.get('content'):
         featured_image_url = og_img['content']
 
-    # Tanggal Published & Modified
     date_published = ""
     date_modified = ""
     pub_match = RE_PUB.search(html_content)
@@ -340,10 +320,8 @@ def parse_article_detail(html_content, url):
     if mod_match:
         date_modified = mod_match.group(1)
 
-    # Ekstraksi Slug berjenjang lengkap
-    slug, sub_slug, sub_sub_slug, article_slug = extract_slugs(url)
+    slug_fields = extract_slugs_dynamic(url)
 
-    # Ekstraksi Paragraf & Heading Utama
     content_blocks = []
     main_container = soup.find('div', class_='archive-main-content') or soup.find('article') or soup
 
@@ -362,9 +340,6 @@ def parse_article_detail(html_content, url):
 
     doc = {
         'url': url,
-        'slug': slug,
-        'sub_slug': sub_slug,
-        'article_slug': article_slug,
         'is_headline': is_headline,
         'date_published': date_published,
         'date_modified': date_modified,
@@ -373,11 +348,7 @@ def parse_article_detail(html_content, url):
         'content_blocks': content_blocks,
         'crawled_at': datetime.now().isoformat()
     }
-
-    # Hanya menyertakan field sub_sub_slug jika bernilai ada
-    if sub_sub_slug:
-        doc['sub_sub_slug'] = sub_sub_slug
-
+    doc.update(slug_fields)
     return doc
 
 async def process_single_article(session, url, proxies, semaphore, lock, new_articles_data, pbar):
@@ -398,9 +369,11 @@ async def main():
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
     }
-    connector = aiohttp.TCPConnector(limit=1000)
+    connector = aiohttp.TCPConnector(limit=200)
 
-    async with aiohttp.ClientSession(headers=headers, connector=connector) as session:
+    # Tambahkan global timeout agar request tidak menggantung selamanya
+    session_timeout = aiohttp.ClientTimeout(total=10, connect=4)
+    async with aiohttp.ClientSession(headers=headers, connector=connector, timeout=session_timeout) as session:
         proxies = await fetch_proxy_list(session)
 
         # --- TAHAP 1: DISCOVERY SLUGS ---
