@@ -29,15 +29,17 @@ BASE_TARGET_URL = "https://mojok.co/"
 TEMP_SLUGS_FILE = "temp_all_slugs.txt"
 PROXY_LIST_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
 
-# Diturunkan agar aman dan tidak memicu rate-limit / hang di GitHub Actions
+# Batas concurrency aman untuk GitHub Actions
 CONCURRENCY_LIMIT_CATEGORY = 15
 CONCURRENCY_LIMIT_ARTICLE = 15
 
+# URL Non-artikel yang Wajib Diabaikan Bot
 IGNORED_PATHS = {
     'kirim-artikel', 'kirim-tulisan', 'tentang', 'kru-mojok',
     'kontak', 'pedoman-media-siber', 'kebijakan-privasi', 'page', 'ketentuan', 'faq'
 }
 
+# Regex Meta Dates
 RE_PUB = re.compile(r'(?i)<meta\s+property=["\']article:published_time["\']\s+content=["\']([^"\']+)["\']')
 RE_MOD = re.compile(r'(?i)<meta\s+property=["\']article:modified_time["\']\s+content=["\']([^"\']+)["\']')
 
@@ -58,6 +60,10 @@ def get_db_collection():
         sys.exit(1)
 
 def extract_slugs_dynamic(url_str):
+    """
+    Ekstraksi hirarki slug secara otomatis tanpa peduli seberapa dalam kategorinya.
+    Memisahkan kategori induk, sub-kategori, sub-sub-kategori, hingga artikel-slug.
+    """
     try:
         parsed = urllib.parse.urlparse(url_str)
         path_parts = [p for p in parsed.path.strip('/').split('/') if p]
@@ -84,6 +90,7 @@ def extract_slugs_dynamic(url_str):
         return {"slug": "", "sub_slug": "", "sub_sub_slug": "", "article_slug": ""}
 
 def is_valid_article_url(url_str):
+    """Filter ketat agar URL pagination/kategori/page tidak bocor ke DB."""
     if not url_str or "mojok.co" not in url_str:
         return False
     
@@ -93,12 +100,23 @@ def is_valid_article_url(url_str):
     if not parts:
         return False
     
+    # 1. TOLAK jika ada kata 'page' di MANAPUN dalam segmen URL
+    if 'page' in parts:
+        return False
+
+    # 2. TOLAK jika segmen terakhir hanya berisi ANGKA murni (e.g. /page/11/)
+    if parts[-1].isdigit():
+        return False
+
+    # 3. TOLAK static pages & non-article paths
     if parts[0] in IGNORED_PATHS or parts[-1] in IGNORED_PATHS:
         return False
     
+    # 4. TOLAK jika segmen terakhir adalah kategori/topik murni
     if parts[-1] in {'topik', 'kuliner', 'hiburan', 'gaya-hidup', 'film', 'anime', 'musik', 'sinetron', 'serial', 'game', 'gadget', 'kampus', 'pendidikan'}:
         return False
 
+    # 5. TOLAK jika cuma 1 level dan itu nama rubrik (misal: https://mojok.co/tajuk/)
     if len(parts) == 1 and parts[0] in {'esai', 'tajuk', 'pojokan', 'kilas', 'cuan', 'otomojok', 'maljum', 'liputan', 'terminal'}:
         return False
         
@@ -173,7 +191,7 @@ async def fetch_proxy_list(session):
 
 async def fetch_html_loop(session, url, proxies, batch_size=5, timeout=5):
     for attempt in range(3):
-        # 1. Direct fetch (tanpa proxy)
+        # 1. Direct fetch terlebih dahulu
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=6), ssl=False) as resp:
                 if resp.status == 200:
@@ -181,14 +199,13 @@ async def fetch_html_loop(session, url, proxies, batch_size=5, timeout=5):
         except Exception:
             pass
 
-        # 2. Proxy fetch
+        # 2. Batch proxy fetch dengan hard timeout 8.0s agar tidak menggantung
         if proxies:
             import random
             batch = random.sample(proxies, min(batch_size, len(proxies)))
             tasks = [try_proxy(session, url, p, timeout) for p in batch]
             
             try:
-                # Maksimal tunggu 8 detik per batch proxy
                 results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=8.0)
                 for html in results:
                     if isinstance(html, str) and html:
@@ -370,9 +387,8 @@ async def main():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
     }
     connector = aiohttp.TCPConnector(limit=200)
-
-    # Tambahkan global timeout agar request tidak menggantung selamanya
     session_timeout = aiohttp.ClientTimeout(total=10, connect=4)
+
     async with aiohttp.ClientSession(headers=headers, connector=connector, timeout=session_timeout) as session:
         proxies = await fetch_proxy_list(session)
 
