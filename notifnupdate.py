@@ -25,21 +25,19 @@ COLLECTION_NAME = os.getenv("COLLECTION_NAME", "articles")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+TARGET_MOJOK_URL = "https://mojok.co/"
 TARGET_TERMINAL_URL = "https://mojok.co/terminal/"
 TEMP_SLUGS_FILE = "temp_all_slugs.txt"
 PROXY_LIST_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
 
-# Batas concurrency aman untuk GitHub Actions
 CONCURRENCY_LIMIT_CATEGORY = 15
 CONCURRENCY_LIMIT_ARTICLE = 15
 
-# URL Non-artikel/Spesial yang Wajib Diabaikan
 IGNORED_PATHS = {
     'video', 'terminal', 'kirim-artikel', 'kirim-tulisan', 'tentang', 'kru-mojok',
-    'kontak', 'pedoman-media-siber', 'kebijakan-privasi', 'page', 'ketentuan', 'faq', 'topik'
+    'kontak', 'pedoman-media-siber', 'kebijakan-privasi', 'page', 'ketentuan', 'faq', 'topik', 'wp-json'
 }
 
-# Regex Meta Dates
 RE_PUB = re.compile(r'(?i)<meta\s+property=["\']article:published_time["\']\s+content=["\']([^"\']+)["\']')
 RE_MOD = re.compile(r'(?i)<meta\s+property=["\']article:modified_time["\']\s+content=["\']([^"\']+)["\']')
 
@@ -60,22 +58,17 @@ def get_db_collection():
         sys.exit(1)
 
 def cleanup_database_pages(collection):
-    """Menghapus otomatis dokumen sampah page/angka/video di MongoDB sebelum scraping mulai."""
     try:
         res1 = collection.delete_many({"sub_sub_slug": "page"})
         res2 = collection.delete_many({"article_slug": {"$regex": "^[0-9]+$"}})
         res3 = collection.delete_many({"slug": "video"})
         total = res1.deleted_count + res2.deleted_count + res3.deleted_count
         if total > 0:
-            print(f"🧹 [DB Cleanup] Berhasil menghapus {total} dokumen sampah (page/angka/video) dari database!\n")
+            print(f"🧹 [DB Cleanup] Berhasil menghapus {total} dokumen sampah dari database!\n")
     except Exception as e:
         print(f"⚠️ [DB Cleanup] Gagal menjalankan pembersihan DB: {e}\n")
 
 def extract_slugs_dynamic(url_str):
-    """
-    Ekstraksi hirarki slug secara otomatis. 
-    Menyesuaikan pola Terminal (/terminal/...) dan topik sub-kategori.
-    """
     try:
         parsed = urllib.parse.urlparse(url_str)
         path_parts = [p for p in parsed.path.strip('/').split('/') if p]
@@ -83,38 +76,30 @@ def extract_slugs_dynamic(url_str):
         if not path_parts:
             return {}
 
-        # Jika URL berasal dari domain Terminal Mojok (/terminal/...)
         if path_parts[0] == 'terminal':
             article_slug = path_parts[-1]
-            category_parts = path_parts[:-1] # Termasuk 'terminal' di indeks 0
-            
-            # Jika ada segmen 'topik', kita bersihkan agar slug bersih
-            category_parts = [c for c in category_parts if c != 'topik']
+            category_parts = [c for c in path_parts[:-1] if c != 'topik']
 
-            slug_data = {
+            return {
                 "slug": category_parts[0] if len(category_parts) > 0 else "terminal",
                 "sub_slug": category_parts[1] if len(category_parts) > 1 else "",
                 "sub_sub_slug": category_parts[2] if len(category_parts) > 2 else "",
                 "article_slug": article_slug
             }
-            return slug_data
 
-        # Untuk URL Mojok Utama non-terminal
         article_slug = path_parts[-1]
-        category_parts = path_parts[:-1]
+        category_parts = [c for c in path_parts[:-1] if c != 'topik']
 
-        slug_data = {
+        return {
             "slug": category_parts[0] if len(category_parts) > 0 else "",
             "sub_slug": category_parts[1] if len(category_parts) > 1 else "",
             "sub_sub_slug": category_parts[2] if len(category_parts) > 2 else "",
             "article_slug": article_slug
         }
-        return slug_data
     except Exception:
         return {"slug": "", "sub_slug": "", "sub_sub_slug": "", "article_slug": ""}
 
 def is_valid_article_url(url_str):
-    """Filter ketat agar URL pagination/kategori/page/video tidak bocor ke DB."""
     if not url_str or "mojok.co" not in url_str:
         return False
     
@@ -124,23 +109,18 @@ def is_valid_article_url(url_str):
     if not parts:
         return False
     
-    # 1. TOLAK jika ada kata 'page' atau 'video' di MANAPUN dalam segmen URL
-    if 'page' in parts or 'video' in parts:
+    if 'page' in parts or 'video' in parts or 'wp-json' in parts:
         return False
 
-    # 2. TOLAK jika segmen terakhir hanya berisi ANGKA murni (e.g. /page/11/)
     if parts[-1].isdigit():
         return False
 
-    # 3. TOLAK static pages & non-article paths
     if parts[0] in IGNORED_PATHS or parts[-1] in IGNORED_PATHS:
         return False
     
-    # 4. TOLAK jika segmen terakhir adalah kategori/topik murni
     if parts[-1] in {'topik', 'kuliner', 'hiburan', 'gaya-hidup', 'film', 'anime', 'musik', 'sinetron', 'serial', 'game', 'gadget', 'kampus', 'pendidikan', 'nusantara', 'ekonomi', 'teknologi', 'olahraga', 'otomotif'}:
         return False
 
-    # 5. TOLAK jika cuma 1 level dan itu nama rubrik (misal: https://mojok.co/terminal/)
     if len(parts) == 1 and parts[0] in {'esai', 'tajuk', 'pojokan', 'kilas', 'cuan', 'otomojok', 'maljum', 'liputan', 'terminal'}:
         return False
         
@@ -246,19 +226,22 @@ async def try_proxy(session, url, proxy, timeout=5):
     except Exception:
         return None
 
-# ================= 3. TAHAP 1: DISCOVERY TERMINAL NAV =================
-def extract_terminal_nav_links(html_content):
-    """Mengambil seluruh link topik & sub-topik dari navbar Terminal Mojok."""
+# ================= 3. TAHAP 1: DISCOVERY NAV & AJAX LOAD MORE =================
+def extract_all_nav_and_sub_links(html_content):
+    """
+    Ekstraksi link navigasi utama, navbar terminal, dan section 'Lainnya dari Mojok'.
+    """
     soup = BeautifulSoup(html_content, 'html.parser')
     category_links = set()
     
-    nav_container = soup.find('ul', class_='tm-nav-list')
-    if nav_container:
-        for a_tag in nav_container.find_all('a', href=True):
-            href = a_tag['href'].strip()
-            if '/topik/' in href:
+    # Ambil seluruh tag <a> yang menuju ke halaman kategori/rubrik
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href'].strip()
+        if 'mojok.co' in href:
+            # Mengambil URL kategori/rubrik baik utama maupun terminal
+            if '/topik/' in href or any(rubrik in href for rubrik in ['/esai/', '/tajuk/', '/pojokan/', '/kilas/', '/cuan/', '/otomojok/', '/maljum/', '/liputan/']):
                 category_links.add(href)
-                
+
     return list(category_links)
 
 def get_max_page(html_content):
@@ -287,6 +270,43 @@ def extract_article_links_from_page(html_content):
             
     return list(links)
 
+async def fetch_wp_rest_api_posts(session, category_url, proxies, visited_slugs, lock):
+    """
+    Simulasi aksi 'Muat Lebih Banyak' dengan menembak API WP-JSON bawaan WordPress
+    untuk mengambil seluruh postingan yang dimuat via AJAX secara otomatis.
+    """
+    parsed = urllib.parse.urlparse(category_url)
+    is_terminal = 'terminal' in parsed.path
+    base_domain = f"{parsed.scheme}://{parsed.netloc}" + ("/terminal" if is_terminal else "")
+    api_endpoint = f"{base_domain}/wp-json/wp/v2/posts?per_page=50&page="
+
+    page = 1
+    while True:
+        target_api = f"{api_endpoint}{page}"
+        json_raw = await fetch_html_loop(session, target_api, proxies)
+        if not json_raw:
+            break
+        
+        try:
+            posts = json.loads(json_raw)
+            if not posts or not isinstance(posts, list):
+                break
+                
+            new_found = 0
+            async with lock:
+                with open(TEMP_SLUGS_FILE, "a", encoding="utf-8") as f:
+                    for post in posts:
+                        link = post.get('link')
+                        if link and is_valid_article_url(link) and link not in visited_slugs:
+                            visited_slugs.add(link)
+                            f.write(f"{link}\n")
+                            new_found += 1
+            if new_found == 0 or len(posts) < 50:
+                break
+            page += 1
+        except Exception:
+            break
+
 async def process_single_category_page(session, page_url, proxies, semaphore, visited_slugs, lock, pbar):
     async with semaphore:
         html_data = await fetch_html_loop(session, page_url, proxies)
@@ -309,11 +329,12 @@ async def fetch_all_sub_slugs(session, category_urls, proxies):
     lock = asyncio.Lock()
 
     for cat_url in category_urls:
-        print(f"\n[*] Mengambil halaman kategori: {cat_url}")
+        print(f"\n[*] Mengambil halaman kategori/rubrik: {cat_url}")
         first_html = await fetch_html_loop(session, cat_url, proxies)
         if not first_html:
             continue
 
+        # 1. Scraping lewat standard WP Pagination
         max_page = get_max_page(first_html)
         base_url = cat_url.rstrip('/')
 
@@ -330,6 +351,9 @@ async def fetch_all_sub_slugs(session, category_urls, proxies):
         ]
         await asyncio.gather(*tasks)
         pbar.close()
+
+        # 2. Scraping via WP REST API (Menangani Tombol "Muat Lebih Banyak")
+        await fetch_wp_rest_api_posts(session, cat_url, proxies, visited_slugs, lock)
 
     print(f"\n[✔] Tahap 1 Selesai! Total {len(visited_slugs)} slug unik tersimpan di '{TEMP_SLUGS_FILE}'.")
     return list(visited_slugs)
@@ -406,7 +430,6 @@ async def main():
     collection = get_db_collection()
     print("✅ Connected to Database & Indexing Active!\n")
 
-    # Clean DB dari dokumen page / angka / video yang sempat masuk
     cleanup_database_pages(collection)
 
     headers = {
@@ -418,12 +441,19 @@ async def main():
     async with aiohttp.ClientSession(headers=headers, connector=connector, timeout=session_timeout) as session:
         proxies = await fetch_proxy_list(session)
 
-        # --- TAHAP 1: DISCOVERY SLUGS NAVBAR TERMINAL ---
-        print("[*] Mengambil link menu navbar & kategori dari Terminal Mojok...")
+        # --- TAHAP 1: DISCOVERY SLUGS DARI MOJOK & TERMINAL ---
+        print("[*] Mengambil link menu navbar, 'Lainnya dari Mojok', & seluruh kategori...")
         terminal_html = await fetch_html_loop(session, TARGET_TERMINAL_URL, proxies)
+        main_html = await fetch_html_loop(session, TARGET_MOJOK_URL, proxies)
         
-        category_urls = extract_terminal_nav_links(terminal_html) if terminal_html else []
-        print(f"[+] Ditemukan {len(category_urls)} topik/sub-topik di Navbar Terminal Mojok!")
+        category_urls = set()
+        if terminal_html:
+            category_urls.update(extract_all_nav_and_sub_links(terminal_html))
+        if main_html:
+            category_urls.update(extract_all_nav_and_sub_links(main_html))
+
+        category_urls = list(category_urls)
+        print(f"[+] Ditemukan {len(category_urls)} topik/sub-topik/rubrik gabungan!")
 
         all_slugs = await fetch_all_sub_slugs(session, category_urls, proxies)
         clean_slugs = [s for s in all_slugs if is_valid_article_url(s)]
@@ -492,7 +522,6 @@ async def main():
             print(f"     URL: {url}\n")
         print("="*60)
 
-        # Send Telegram Summary & Split Message
         send_telegram_notification(added_articles_list, total_new, success_count)
 
 if __name__ == "__main__":
